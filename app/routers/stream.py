@@ -1,23 +1,28 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from app.core.security import decode_access_token
+from app.core.security import (
+    decode_access_token,
+    create_media_token,
+    validate_media_token,
+    verify_hmac_signature
+)
+from typing import Optional
 
 router = APIRouter(prefix="/stream", tags=["Streaming"])
-
-# This tells FastAPI to expect a Bearer token in the
-# Authorization header on protected routes
 security = HTTPBearer()
+
+# Simulated content library
+CONTENT_LIBRARY = {
+    "episode1": "https://cdn.securestream.internal/medical/episode1.mp4",
+    "episode2": "https://cdn.securestream.internal/medical/episode2.mp4",
+    "episode3": "https://cdn.securestream.internal/medical/episode3.mp4",
+}
 
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security)
 ) -> dict:
-    """
-    Dependency that validates the JWT on every protected request.
-    FastAPI will automatically call this before the route handler runs.
-    If the token is missing, expired, or invalid — the request is
-    rejected here before any business logic executes.
-    """
+    """Validates JWT and returns the decoded payload."""
     try:
         payload = decode_access_token(credentials.credentials)
         return payload
@@ -30,18 +35,90 @@ def get_current_user(
 
 
 @router.get("/{content_id}")
-def get_stream(
+def request_stream(
     content_id: str,
+    x_signature: Optional[str] = Header(None),
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Protected endpoint — requires a valid JWT.
-    Stage 3 will add AES tokenization and HMAC validation here.
-    For now, returns a placeholder confirming auth works.
+    Protected endpoint — requires valid JWT + valid HMAC signature.
+
+    Flow:
+    1. JWT validated by get_current_user dependency
+    2. HMAC signature validated against content_id + username
+    3. Content existence verified
+    4. AES-256 encrypted token generated and returned
+    5. Client uses token at /resolve/ to get actual URL
+
+    The client never receives a raw media URL from this endpoint.
     """
+    # HMAC validation
+    if not x_signature:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing X-Signature header"
+        )
+
+    # The signed payload is content_id + username — both must match
+    signing_payload = f"{content_id}:{current_user.get('sub')}"
+
+    if not verify_hmac_signature(signing_payload, x_signature):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid request signature"
+        )
+
+    # Content existence check
+    if content_id not in CONTENT_LIBRARY:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Content not found"
+        )
+
+    # Generate AES token (never return raw URL)
+    token = create_media_token(
+        content_id=content_id,
+        user_id=current_user.get("sub")
+    )
+
     return {
-        "message": "Stream access granted",
+        "media_token": token,
+        "resolve_url": f"/stream/resolve/{token[:20]}...",
+        "expires_in_seconds": 300,
+        "message": "Use media_token at /stream/resolve/ to access content"
+    }
+
+
+@router.get("/resolve/{token}")
+def resolve_stream(token: str):
+    """
+    Decrypts and validates a media token, returns the actual URL.
+
+    This is the only endpoint that knows real media URLs.
+    Separating token generation from URL resolution means:
+    - The /stream/ endpoint never exposes raw URLs
+    - Tokens can be validated without a database lookup
+    - Expired tokens are rejected here, not at the CDN layer
+    """
+    try:
+        payload = validate_media_token(token)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e)
+        )
+
+    content_id = payload["content_id"]
+
+    if content_id not in CONTENT_LIBRARY:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Content not found"
+        )
+
+    return {
+        "stream_url": CONTENT_LIBRARY[content_id],
         "content_id": content_id,
-        "requested_by": current_user.get("sub"),
-        "note": "AES tokenization coming in Stage 3"
+        "accessed_by": payload["user_id"],
+        "message": "This URL expires — do not cache or share"
     }
