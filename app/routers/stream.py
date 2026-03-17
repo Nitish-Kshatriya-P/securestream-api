@@ -7,6 +7,7 @@ from app.core.security import (
     verify_hmac_signature
 )
 from typing import Optional
+from app.core.logger import log_security_event
 
 router = APIRouter(prefix="/stream", tags=["Streaming"])
 security = HTTPBearer()
@@ -63,6 +64,14 @@ def request_stream(
     signing_payload = f"{content_id}:{current_user.get('sub')}"
 
     if not verify_hmac_signature(signing_payload, x_signature):
+        log_security_event(
+            event_type="HMAC_FAILURE",
+            username=current_user.get("sub"),
+            source_ip="request",
+            endpoint=f"/stream/{content_id}",
+            response_code=401,
+            details="HMAC signature mismatch — possible parameter tampering"
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid request signature"
@@ -79,6 +88,15 @@ def request_stream(
     token = create_media_token(
         content_id=content_id,
         user_id=current_user.get("sub")
+    )
+
+    log_security_event(
+        event_type="STREAM_ACCESS",
+        username=current_user.get("sub"),
+        source_ip="request",
+        endpoint=f"/stream/{content_id}",
+        response_code=200,
+        details=f"Media token issued for {content_id}"
     )
 
     return {
@@ -103,6 +121,14 @@ def resolve_stream(token: str):
     try:
         payload = validate_media_token(token)
     except ValueError as e:
+        log_security_event(
+            event_type="TOKEN_EXPIRED",
+            username="unknown",
+            source_ip="unknown",
+            endpoint=f"/stream/resolve/",
+            response_code=401,
+            details=str(e)
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e)

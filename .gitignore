@@ -1,4 +1,4 @@
-venv/
+stream/
 .env
 __pycache__/
 *.pyc
@@ -6,3 +6,5 @@ __pycache__/
 logs/
 .DS_Store
 dist/
+cert.pem
+key.pem
