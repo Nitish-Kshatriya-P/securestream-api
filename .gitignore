@@ -8,3 +8,4 @@ logs/
 dist/
 cert.pem
 key.pem
+securestream-key.pem
